@@ -13,6 +13,7 @@ import (
 	"os"
 	"net"
 	"os/signal"
+	"sync"
 	"syscall"
 	"path"
 	"runtime"
@@ -82,6 +83,67 @@ var (
 	ErrPermissionDenied = errors.New("Permission denied.")
 	ErrContentNotFound  = errors.New("Content not found.")
 )
+
+type relations map[int]map[int]time.Time
+var (
+	rels relations
+	relsMutex = &sync.Mutex{}
+)
+
+func loadRelations() (relations, error) {
+	rows, err := db.Query(`SELECT one, another, created_at FROM relations`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	rs := relations{}
+	for rows.Next() {
+		var one, another int
+		var createdAt time.Time
+		if err := rows.Scan(&one, &another, &createdAt); err != nil {
+			return nil, err
+		}
+		if m, ok := rs[one]; ok {
+			m[another] = createdAt
+		} else {
+			rs[one] = map[int]time.Time{another: createdAt}
+		}
+	}
+
+	return rs, nil
+}
+
+func addEdge(a, b int, createdAt time.Time) bool {
+	if rels[a] == nil {
+		rels[a] = map[int]time.Time{}
+	}
+	if !rels[a][b].IsZero() {
+		return false
+	}
+	rels[a][b] = createdAt
+	return true
+}
+
+func createRelationIfNotExists(a, b int) bool {
+	createdAt := time.Now()
+	relsMutex.Lock()
+	defer relsMutex.Unlock()
+	ret := addEdge(a, b, createdAt)
+	ret = addEdge(b, a, createdAt) || ret
+	return ret
+}
+
+func getFriendsFromRelations(userID int) []Friend {
+	friends := []Friend{}
+	if rels[userID] == nil {
+		rels[userID] = map[int]time.Time{}
+	}
+	for anotherID, createdAt := range rels[userID] {
+		friends = append(friends, Friend{anotherID, createdAt})
+	}
+	return friends
+}
 
 func authenticate(w http.ResponseWriter, r *http.Request, email, passwd string) {
 	query := `SELECT u.id AS id, u.account_name AS account_name, u.nick_name AS nick_name, u.email AS email
@@ -157,12 +219,17 @@ func getUserFromAccount(w http.ResponseWriter, name string) *User {
 
 func isFriend(w http.ResponseWriter, r *http.Request, anotherID int) bool {
 	session := getSession(w, r)
-	id := session.Values["user_id"]
-	row := db.QueryRow(`SELECT COUNT(1) AS cnt FROM relations WHERE (one = ? AND another = ?) OR (one = ? AND another = ?)`, id, anotherID, anotherID, id)
-	cnt := new(int)
-	err := row.Scan(cnt)
-	checkErr(err)
-	return *cnt > 0
+	id, ok := session.Values["user_id"].(int)
+	if !ok {
+		log.Println("Couldn't convert session user_id to int")
+		return false
+	}
+	m, ok := rels[id]
+	if !ok {
+		return false
+	}
+	_, ok = m[anotherID]
+	return ok
 }
 
 func isFriendAccount(w http.ResponseWriter, r *http.Request, name string) bool {
@@ -387,30 +454,7 @@ LIMIT 10`, user.ID)
 	}
 	rows.Close()
 
-	rows, err = db.Query(`SELECT * FROM relations WHERE one = ? OR another = ? ORDER BY created_at DESC`, user.ID, user.ID)
-	if err != sql.ErrNoRows {
-		checkErr(err)
-	}
-	friendsMap := make(map[int]time.Time)
-	for rows.Next() {
-		var id, one, another int
-		var createdAt time.Time
-		checkErr(rows.Scan(&id, &one, &another, &createdAt))
-		var friendID int
-		if one == user.ID {
-			friendID = another
-		} else {
-			friendID = one
-		}
-		if _, ok := friendsMap[friendID]; !ok {
-			friendsMap[friendID] = createdAt
-		}
-	}
-	friends := make([]Friend, 0, len(friendsMap))
-	for key, val := range friendsMap {
-		friends = append(friends, Friend{key, val})
-	}
-	rows.Close()
+	friends := getFriendsFromRelations(user.ID)
 
 	rows, err = db.Query(`SELECT user_id, owner_id, DATE(created_at) AS date, MAX(created_at) AS updated
 FROM footprints
@@ -673,30 +717,7 @@ func GetFriends(w http.ResponseWriter, r *http.Request) {
 	}
 
 	user := getCurrentUser(w, r)
-	rows, err := db.Query(`SELECT * FROM relations WHERE one = ? OR another = ? ORDER BY created_at DESC`, user.ID, user.ID)
-	if err != sql.ErrNoRows {
-		checkErr(err)
-	}
-	friendsMap := make(map[int]time.Time)
-	for rows.Next() {
-		var id, one, another int
-		var createdAt time.Time
-		checkErr(rows.Scan(&id, &one, &another, &createdAt))
-		var friendID int
-		if one == user.ID {
-			friendID = another
-		} else {
-			friendID = one
-		}
-		if _, ok := friendsMap[friendID]; !ok {
-			friendsMap[friendID] = createdAt
-		}
-	}
-	rows.Close()
-	friends := make([]Friend, 0, len(friendsMap))
-	for key, val := range friendsMap {
-		friends = append(friends, Friend{key, val})
-	}
+	friends := getFriendsFromRelations(user.ID)
 	render(w, r, http.StatusOK, "friends.html", struct{ Friends []Friend }{friends})
 }
 
@@ -707,10 +728,8 @@ func PostFriends(w http.ResponseWriter, r *http.Request) {
 
 	user := getCurrentUser(w, r)
 	anotherAccount := mux.Vars(r)["account_name"]
-	if !isFriendAccount(w, r, anotherAccount) {
-		another := getUserFromAccount(w, anotherAccount)
-		_, err := db.Exec(`INSERT INTO relations (one, another) VALUES (?,?), (?,?)`, user.ID, another.ID, another.ID, user.ID)
-		checkErr(err)
+	another := getUserFromAccount(w, anotherAccount)
+	if createRelationIfNotExists(user.ID, another.ID) {
 		http.Redirect(w, r, "/friends", http.StatusSeeOther)
 	}
 }
@@ -770,6 +789,11 @@ func main() {
 		log.Fatalf("Failed to connect to DB: %s.", err.Error())
 	}
 	defer db.Close()
+
+	if rels, err = loadRelations(); err != nil {
+		log.Printf("Failed to load relations: %v\n", err)
+		return
+	}
 
 	store = sessions.NewCookieStore([]byte(ssecret))
 
