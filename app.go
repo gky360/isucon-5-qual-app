@@ -145,6 +145,35 @@ func getFriendsFromRelations(userID int) []Friend {
 	return friends
 }
 
+
+var (
+	id2user map[int]*User
+	an2user map[string]*User
+)
+
+func loadUsers() error {
+	query := `SELECT u.id AS id, u.account_name AS account_name, u.nick_name AS nick_name, u.email AS email
+From users u`
+	rows, err := db.Query(query)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	id2user = map[int]*User{}
+	an2user = map[string]*User{}
+	for rows.Next() {
+		u := User{}
+		if err := rows.Scan(&u.ID, &u.AccountName, &u.NickName, &u.Email); err != nil {
+			return err
+		}
+		id2user[u.ID] = &u
+		an2user[u.AccountName] = &u
+	}
+
+	return nil
+}
+
 func authenticate(w http.ResponseWriter, r *http.Request, email, passwd string) {
 	query := `SELECT u.id AS id, u.account_name AS account_name, u.nick_name AS nick_name, u.email AS email
 FROM users u
@@ -175,15 +204,12 @@ func getCurrentUser(w http.ResponseWriter, r *http.Request) *User {
 	if !ok || userID == nil {
 		return nil
 	}
-	row := db.QueryRow(`SELECT id, account_name, nick_name, email FROM users WHERE id=?`, userID)
-	user := User{}
-	err := row.Scan(&user.ID, &user.AccountName, &user.NickName, &user.Email)
-	if err == sql.ErrNoRows {
+	user := id2user[userID.(int)]
+	if user == nil {
 		checkErr(ErrAuthentication)
 	}
-	checkErr(err)
-	context.Set(r, "user", user)
-	return &user
+	context.Set(r, "user", *user)
+	return user
 }
 
 func authenticated(w http.ResponseWriter, r *http.Request) bool {
@@ -196,25 +222,19 @@ func authenticated(w http.ResponseWriter, r *http.Request) bool {
 }
 
 func getUser(w http.ResponseWriter, userID int) *User {
-	row := db.QueryRow(`SELECT * FROM users WHERE id = ?`, userID)
-	user := User{}
-	err := row.Scan(&user.ID, &user.AccountName, &user.NickName, &user.Email, new(string))
-	if err == sql.ErrNoRows {
+	user := id2user[userID]
+	if user == nil {
 		checkErr(ErrContentNotFound)
 	}
-	checkErr(err)
-	return &user
+	return user
 }
 
 func getUserFromAccount(w http.ResponseWriter, name string) *User {
-	row := db.QueryRow(`SELECT * FROM users WHERE account_name = ?`, name)
-	user := User{}
-	err := row.Scan(&user.ID, &user.AccountName, &user.NickName, &user.Email, new(string))
-	if err == sql.ErrNoRows {
+	user := an2user[name]
+	if user == nil {
 		checkErr(ErrContentNotFound)
 	}
-	checkErr(err)
-	return &user
+	return user
 }
 
 func isFriend(w http.ResponseWriter, r *http.Request, anotherID int) bool {
@@ -792,6 +812,10 @@ func main() {
 
 	if rels, err = loadRelations(); err != nil {
 		log.Printf("Failed to load relations: %v\n", err)
+		return
+	}
+	if err = loadUsers(); err != nil {
+		log.Printf("Failed to load users: %v\n", err)
 		return
 	}
 
