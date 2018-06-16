@@ -261,7 +261,7 @@ func isFriendAccount(w http.ResponseWriter, r *http.Request, name string) bool {
 	return isFriend(w, r, user.ID)
 }
 
-func getFriendIds(userID string) []interface{} {
+func getFriendIds(userID int) []interface{} {
 	friendIds := make([]interface{}, 0)
 	for i, t := range rels[userID] {
 		if !t.IsZero() {
@@ -456,34 +456,32 @@ LIMIT 10`, user.ID)
 		rows.Close()
 	}
 
-	rows, err = db.Query(`SELECT * FROM comments ORDER BY created_at DESC LIMIT 1000`)
-	if err != sql.ErrNoRows {
-		checkErr(err)
-	}
 	commentsOfFriends := make([]Comment, 0, 10)
-	for rows.Next() {
-		c := Comment{}
-		checkErr(rows.Scan(&c.ID, &c.EntryID, &c.UserID, &c.Comment, &c.CreatedAt))
-		if !isFriend(w, r, c.UserID) {
-			continue
+	if len(friendIds) > 0 {
+		sqlStr:=
+		"SELECT c.id, c.entry_id, c.user_id, c.comment, c.created_at FROM comments c\n" +
+		"JOIN entries e ON c.entry_id = e.id\n" +
+		"WHERE c.user_id IN (?" + strings.Repeat(",?", len(friendIds)-1) + ")\n" +
+		"AND (\n" +
+		"  e.private = 0\n" +
+		"  OR\n" +
+		"  e.private = 1 AND (e.user_id = ? OR e.user_id IN (?" + strings.Repeat(",?", len(friendIds)-1) + "))\n" +
+		")\n" +
+		"ORDER BY c.id DESC LIMIT 10"
+		args := friendIds
+		args = append(args, user.ID)
+		args = append(args, friendIds...)
+		rows, err = db.Query(sqlStr, args...)
+		if err != sql.ErrNoRows {
+			checkErr(err)
 		}
-		row := db.QueryRow(`SELECT * FROM entries WHERE id = ?`, c.EntryID)
-		var id, userID, private int
-		var body string
-		var createdAt time.Time
-		checkErr(row.Scan(&id, &userID, &private, &body, &createdAt))
-		entry := Entry{id, userID, private == 1, strings.SplitN(body, "\n", 2)[0], strings.SplitN(body, "\n", 2)[1], createdAt}
-		if entry.Private {
-			if !permitted(w, r, entry.UserID) {
-				continue
-			}
+		for rows.Next() {
+			c := Comment{}
+			checkErr(rows.Scan(&c.ID, &c.EntryID, &c.UserID, &c.Comment, &c.CreatedAt))
+			commentsOfFriends = append(commentsOfFriends, c)
 		}
-		commentsOfFriends = append(commentsOfFriends, c)
-		if len(commentsOfFriends) >= 10 {
-			break
-		}
+		rows.Close()
 	}
-	rows.Close()
 
 	friends := getFriendsFromRelations(user.ID)
 
