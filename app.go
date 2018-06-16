@@ -3,10 +3,6 @@ package main
 import (
 	"database/sql"
 	"errors"
-	"github.com/go-sql-driver/mysql"
-	"github.com/gorilla/context"
-	"github.com/gorilla/mux"
-	"github.com/gorilla/sessions"
 	"html/template"
 	"log"
 	"net/http"
@@ -20,6 +16,11 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/go-sql-driver/mysql"
+	"github.com/gorilla/context"
+	"github.com/gorilla/mux"
+	"github.com/gorilla/sessions"
 )
 
 var (
@@ -260,6 +261,16 @@ func isFriendAccount(w http.ResponseWriter, r *http.Request, name string) bool {
 	return isFriend(w, r, user.ID)
 }
 
+func getFriendIds(userID string) []interface{} {
+	friendIds := make([]interface{}, 0)
+	for i, t := range rels[userID] {
+		if !t.IsZero() {
+			friendIds = append(friendIds, i)
+		}
+	}
+	return friendIds
+}
+
 func permitted(w http.ResponseWriter, r *http.Request, anotherID int) bool {
 	user := getCurrentUser(w, r)
 	if anotherID == user.ID {
@@ -425,25 +436,25 @@ LIMIT 10`, user.ID)
 	}
 	rows.Close()
 
-	rows, err = db.Query(`SELECT * FROM entries ORDER BY created_at DESC LIMIT 1000`)
-	if err != sql.ErrNoRows {
-		checkErr(err)
-	}
+	friendIds := getFriendIds(user.ID)
 	entriesOfFriends := make([]Entry, 0, 10)
-	for rows.Next() {
-		var id, userID, private int
-		var body string
-		var createdAt time.Time
-		checkErr(rows.Scan(&id, &userID, &private, &body, &createdAt))
-		if !isFriend(w, r, userID) {
-			continue
+	if len(friendIds) > 0 {
+		sqlStr := "SELECT * FROM entries\n" +
+		"WHERE user_id IN (?" + strings.Repeat(",?", len(friendIds)-1) + ")\n" +
+		"ORDER BY id DESC LIMIT 10"
+		rows, err = db.Query(sqlStr, friendIds...)
+		if err != sql.ErrNoRows {
+			checkErr(err)
 		}
-		entriesOfFriends = append(entriesOfFriends, Entry{id, userID, private == 1, strings.SplitN(body, "\n", 2)[0], strings.SplitN(body, "\n", 2)[1], createdAt})
-		if len(entriesOfFriends) >= 10 {
-			break
+		for rows.Next() {
+			var id, userID, private int
+			var body string
+			var createdAt time.Time
+			checkErr(rows.Scan(&id, &userID, &private, &body, &createdAt))
+			entriesOfFriends = append(entriesOfFriends, Entry{id, userID, private == 1, strings.SplitN(body, "\n", 2)[0], strings.SplitN(body, "\n", 2)[1], createdAt})
 		}
+		rows.Close()
 	}
-	rows.Close()
 
 	rows, err = db.Query(`SELECT * FROM comments ORDER BY created_at DESC LIMIT 1000`)
 	if err != sql.ErrNoRows {
