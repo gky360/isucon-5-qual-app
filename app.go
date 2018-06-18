@@ -355,10 +355,10 @@ func render(w http.ResponseWriter, r *http.Request, status int, file string, dat
 		"getEntry": func(id int) Entry {
 			row := db.QueryRow(`SELECT * FROM entries WHERE id=?`, id)
 			var entryID, userID, private int
-			var body string
+			var body, title string
 			var createdAt time.Time
-			checkErr(row.Scan(&entryID, &userID, &private, &body, &createdAt))
-			return Entry{id, userID, private == 1, strings.SplitN(body, "\n", 2)[0], strings.SplitN(body, "\n", 2)[1], createdAt}
+			checkErr(row.Scan(&entryID, &userID, &private, &body, &createdAt, &title))
+			return Entry{id, userID, private == 1, title, body, createdAt}
 		},
 		"numComments": func(id int) int {
 			row := db.QueryRow(`SELECT COUNT(*) AS c FROM comments WHERE entry_id = ?`, id)
@@ -405,17 +405,17 @@ func GetIndex(w http.ResponseWriter, r *http.Request) {
 		checkErr(err)
 	}
 
-	rows, err := db.Query(`SELECT * FROM entries WHERE user_id = ? ORDER BY created_at LIMIT 5`, user.ID)
+	rows, err := db.Query(`SELECT id, user_id, private, title, created_at FROM entries WHERE user_id = ? ORDER BY created_at LIMIT 5`, user.ID)
 	if err != sql.ErrNoRows {
 		checkErr(err)
 	}
 	entries := make([]Entry, 0, 5)
 	for rows.Next() {
 		var id, userID, private int
-		var body string
+		var title string
 		var createdAt time.Time
-		checkErr(rows.Scan(&id, &userID, &private, &body, &createdAt))
-		entries = append(entries, Entry{id, userID, private == 1, strings.SplitN(body, "\n", 2)[0], strings.SplitN(body, "\n", 2)[1], createdAt})
+		checkErr(rows.Scan(&id, &userID, &private, &title, &createdAt))
+		entries = append(entries, Entry{id, userID, private == 1, title, "", createdAt})
 	}
 	rows.Close()
 
@@ -439,7 +439,7 @@ LIMIT 10`, user.ID)
 	friendIds := getFriendIds(user.ID)
 	entriesOfFriends := make([]Entry, 0, 10)
 	if len(friendIds) > 0 {
-		sqlStr := "SELECT * FROM entries\n" +
+		sqlStr := "SELECT id, user_id, private, title, created_at FROM entries\n" +
 		"WHERE user_id IN (?" + strings.Repeat(",?", len(friendIds)-1) + ")\n" +
 		"ORDER BY id DESC LIMIT 10"
 		rows, err = db.Query(sqlStr, friendIds...)
@@ -448,10 +448,10 @@ LIMIT 10`, user.ID)
 		}
 		for rows.Next() {
 			var id, userID, private int
-			var body string
+			var title string
 			var createdAt time.Time
-			checkErr(rows.Scan(&id, &userID, &private, &body, &createdAt))
-			entriesOfFriends = append(entriesOfFriends, Entry{id, userID, private == 1, strings.SplitN(body, "\n", 2)[0], strings.SplitN(body, "\n", 2)[1], createdAt})
+			checkErr(rows.Scan(&id, &userID, &private, &title, &createdAt))
+			entriesOfFriends = append(entriesOfFriends, Entry{id, userID, private == 1, title, "", createdAt})
 		}
 		rows.Close()
 	}
@@ -541,10 +541,10 @@ func GetProfile(w http.ResponseWriter, r *http.Request) {
 	entries := make([]Entry, 0, 5)
 	for rows.Next() {
 		var id, userID, private int
-		var body string
+		var body, title string
 		var createdAt time.Time
-		checkErr(rows.Scan(&id, &userID, &private, &body, &createdAt))
-		entry := Entry{id, userID, private == 1, strings.SplitN(body, "\n", 2)[0], strings.SplitN(body, "\n", 2)[1], createdAt}
+		checkErr(rows.Scan(&id, &userID, &private, &body, &createdAt, &title))
+		entry := Entry{id, userID, private == 1, title, body, createdAt}
 		entries = append(entries, entry)
 	}
 	rows.Close()
@@ -604,10 +604,10 @@ func ListEntries(w http.ResponseWriter, r *http.Request) {
 	entries := make([]Entry, 0, 20)
 	for rows.Next() {
 		var id, userID, private int
-		var body string
+		var body, title string
 		var createdAt time.Time
-		checkErr(rows.Scan(&id, &userID, &private, &body, &createdAt))
-		entry := Entry{id, userID, private == 1, strings.SplitN(body, "\n", 2)[0], strings.SplitN(body, "\n", 2)[1], createdAt}
+		checkErr(rows.Scan(&id, &userID, &private, &body, &createdAt, &title))
+		entry := Entry{id, userID, private == 1, title, body, createdAt}
 		entries = append(entries, entry)
 	}
 	rows.Close()
@@ -628,14 +628,14 @@ func GetEntry(w http.ResponseWriter, r *http.Request) {
 	entryID := mux.Vars(r)["entry_id"]
 	row := db.QueryRow(`SELECT * FROM entries WHERE id = ?`, entryID)
 	var id, userID, private int
-	var body string
+	var body, title string
 	var createdAt time.Time
-	err := row.Scan(&id, &userID, &private, &body, &createdAt)
+	err := row.Scan(&id, &userID, &private, &body, &createdAt, &title)
 	if err == sql.ErrNoRows {
 		checkErr(ErrContentNotFound)
 	}
 	checkErr(err)
-	entry := Entry{id, userID, private == 1, strings.SplitN(body, "\n", 2)[0], strings.SplitN(body, "\n", 2)[1], createdAt}
+	entry := Entry{id, userID, private == 1, title, body, createdAt}
 	owner := getUser(w, entry.UserID)
 	if entry.Private {
 		if !permitted(w, r, owner.ID) {
@@ -680,7 +680,7 @@ func PostEntry(w http.ResponseWriter, r *http.Request) {
 	} else {
 		private = 1
 	}
-	_, err := db.Exec(`INSERT INTO entries (user_id, private, body) VALUES (?,?,?)`, user.ID, private, title+"\n"+content)
+	_, err := db.Exec(`INSERT INTO entries (user_id, private, title, body) VALUES (?,?,?,?)`, user.ID, private, title, content)
 	checkErr(err)
 	http.Redirect(w, r, "/diary/entries/"+user.AccountName, http.StatusSeeOther)
 }
@@ -693,15 +693,15 @@ func PostComment(w http.ResponseWriter, r *http.Request) {
 	entryID := mux.Vars(r)["entry_id"]
 	row := db.QueryRow(`SELECT * FROM entries WHERE id = ?`, entryID)
 	var id, userID, private int
-	var body string
+	var body, title string
 	var createdAt time.Time
-	err := row.Scan(&id, &userID, &private, &body, &createdAt)
+	err := row.Scan(&id, &userID, &private, &body, &createdAt, &title)
 	if err == sql.ErrNoRows {
 		checkErr(ErrContentNotFound)
 	}
 	checkErr(err)
 
-	entry := Entry{id, userID, private == 1, strings.SplitN(body, "\n", 2)[0], strings.SplitN(body, "\n", 2)[1], createdAt}
+	entry := Entry{id, userID, private == 1, title, body, createdAt}
 	owner := getUser(w, entry.UserID)
 	if entry.Private {
 		if !permitted(w, r, owner.ID) {
